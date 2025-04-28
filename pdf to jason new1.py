@@ -76,6 +76,7 @@ def extract_products_block(text):
 def extract_products(products_block):
     lines = products_block.split("\n")
     products = []
+    seen = set()
 
     for line in lines:
         parts = line.split()
@@ -85,11 +86,16 @@ def extract_products(products_block):
         try:
             product_info = parse_product_line(parts)
             if product_info:
-                products.append(product_info)
+                
+                key = (product_info["product_number"], product_info["product_name"], product_info["amount"])
+                if key not in seen:
+                    seen.add(key)
+                    products.append(product_info)
         except Exception as e:
             print(f"Error parsing line: {line}\n{e}")
 
-    return products 
+    return products
+
 
 
 def parse_product_line(parts):
@@ -111,11 +117,25 @@ def parse_product_line(parts):
         match = pattern.match(line)
         if match:
             g = match.groupdict()
+            desc = g.get("desc", "").strip()
+            size = g.get("size", "").strip()
+            
+            parts = desc.split("-")
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) >= 2:
+                code = parts[0]
+                maybe_size = parts[1] if len(parts) > 2 else ""
+                product_name = " - ".join(parts[2:]) if len(parts) > 2 else parts[1]
+                description = f"{code} - {maybe_size}".strip(" -")
+            else:
+                product_name = desc
+                description = ""
             return {
                 "product_number": g.get("number"),
-                "description": g.get("desc", "").strip(),
+                "product_name": product_name,
+                "description": description,
                 "hsn_sac": g.get("hsn", ""),
-                "size": g.get("size", ""),
+                "size": size,
                 "quantity": g.get("qty", ""),
                 "rate": g.get("rate", ""),
                 "discount": (g.get("discount", "") + "%") if g.get("discount") else "",
@@ -128,26 +148,41 @@ def parse_product_line(parts):
 
 
 def extract_tax_and_totals(text, invoice_data):
-    total_amount = extract_tax(text, r'\bTotal\s*₹?\s*([0-9,]+\.\d{1,2})') or "0"
-    invoice_data['total'] = total_amount
-    print(f"Extracted Total Amount: {total_amount}") 
+    product_total = sum(float(p.get("amount", "0").replace(",", "")) for p in invoice_data.get("products", []))
+    
+    extracted_total = extract_tax(text, r'\bTotal\s*₹?\s*([0-9,]+\.\d{1,2})')
+    extracted_total_float = float(extracted_total or "0")
+    
+    if extracted_total_float < (product_total * 0.8):
+        subtotal = product_total
+    else:
+        subtotal = extracted_total_float
 
-    invoice_data['cgst'] = extract_tax_amount_or_percentage(text, ['CGST', 'C-GST', 'OUTPUT CGST'], float(total_amount.replace(",", "")))
-    invoice_data['sgst'] = extract_tax_amount_or_percentage(text, ['SGST', 'S-GST', 'OUTPUT SGST'], float(total_amount.replace(",", "")))
-    invoice_data['igst'] = extract_tax_amount_or_percentage(text, ['IGST'], float(total_amount.replace(",", "")))
+    invoice_data['total'] = f"{subtotal:.2f}"
 
-    discount_amount = float(invoice_data.get("discount", "0") or "0")  
-    grand_total = float(total_amount.replace(",", "")) - discount_amount
 
-    for tax_key in ['cgst', 'sgst', 'igst']:
-        tax_value = invoice_data.get(tax_key, "")
-        if tax_value:
-            try:
-                grand_total += float(tax_value)
-            except ValueError:
-                pass
+    cgst_amount = get_tax_value_in_rupees(text, ['CGST', 'C-GST', 'OUTPUT CGST'], subtotal)
+    sgst_amount = get_tax_value_in_rupees(text, ['SGST', 'S-GST', 'OUTPUT SGST'], subtotal)
+    igst_amount = get_tax_value_in_rupees(text, ['IGST'], subtotal)
+
+    
+    cgst = float(cgst_amount or "0")
+    sgst = float(sgst_amount or "0")
+    igst = float(igst_amount or "0")
+
+    invoice_data['cgst'] = f"{cgst:.2f}"
+    invoice_data['sgst'] = f"{sgst:.2f}"
+    invoice_data['igst'] = f"{igst:.2f}"
+
+    discount_amount = float(invoice_data.get("discount", "0") or "0")
+    
+    grand_total = subtotal + cgst + sgst + igst - discount_amount
 
     invoice_data['grand_total'] = f"{grand_total:.2f}"
+
+
+
+
 
 
 def extract_discount_amount(text):
@@ -157,19 +192,37 @@ def extract_discount_amount(text):
     return "0"
 
 
-def extract_tax_amount_or_percentage(text, labels, subtotal):
+def get_tax_value_in_rupees(text, labels, subtotal):
+    """
+    Extract tax either directly in rupees or calculate from percentage.
+    """
     for label in labels:
-        amount_match = re.search(rf'{label}[^\d₹%]*₹?\s*([0-9,]+\.\d{{1,2}})', text, re.IGNORECASE)
-        if amount_match:
-            return amount_match.group(1).replace(",", "").strip()
+        
+        rupee_match = re.search(rf'{label}[^\d₹%]*₹\s*([0-9,]+\.\d{{1,2}})', text, re.IGNORECASE)
+        if rupee_match:
+            return rupee_match.group(1).replace(",", "").strip()
 
+        
         percent_match = re.search(rf'{label}[^\d₹%]*([0-9]+\.\d+|\d+)\s*%', text, re.IGNORECASE)
-        if percent_match:
+        if percent_match and subtotal > 0:
             percentage = float(percent_match.group(1))
-            tax_value = subtotal * (percentage / 100)
-            return f"{tax_value:.2f}"
+            tax_in_rupees = subtotal * (percentage / 100)
+            return f"{tax_in_rupees:.2f}"
 
-    return ""
+        loose_percent_match = re.search(rf'{label}[^\d₹%]*([0-9]+\.\d+|\d+)\b', text, re.IGNORECASE)
+        if loose_percent_match and subtotal > 0:
+            percentage = float(loose_percent_match.group(1))
+            tax_in_rupees = subtotal * (percentage / 100)
+            return f"{tax_in_rupees:.2f}"
+
+    return "0.00"
+
+
+
+
+
+
+
 
 
 def extract_tax(text, regex):
@@ -193,7 +246,7 @@ def save_to_json(data, output_path):
         json.dump(data, f, indent=4)
     print(f"\n Data saved to: {output_path}")
 
-pdf_path = r"C:\Users\DELL8\OneDrive\Pictures\.ipynb_checkpoints\multi GST.pdf"
+pdf_path = r"C:\Users\DELL8\Downloads\dugar fashion.pdf"
 output_path = "parsed_invoice.json"
 
 invoice_data = extract_invoice_details(pdf_path)
