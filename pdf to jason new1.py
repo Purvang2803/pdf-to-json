@@ -35,20 +35,30 @@ def extract_invoice_details(pdf_path):
 
     return invoice_data
 
+def find_first_match(text, patterns):
+    matches = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, text):
+            match_val = match.group(1) if match.lastindex else match.group(0)
+            matches.append(match_val)
+    return max(matches, key=len) if matches else ""
+
 
 def extract_invoice_number(text):
     patterns = [
-        r'\b[A-Z]{3}/\d{4}-\d{2}/\d{4}\b',
+        r'\b[A-Z]{2,10}/\d{1,6}/\d{2,4}-\d{2,4}\b',       
+        r'\b[A-Z]{1,5}[-/]?\d{1,6}/\d{2}-\d{2}\b',
+        r'\b\S+/[0-9]{2}-[0-9]{2}/[0-9]+\b',
         r'\b[A-Z0-9]+/[0-9]{4}-[0-9]{2}\b',
         r'\b[A-Z0-9]+/[0-9]{2}-[0-9]{2}\b',
-        r'\b\S+/[0-9]{2}-[0-9]{2}/[0-9]+\b',
-        r'\b[A-Z]{1,5}[-/]?\d{1,6}/\d{2}-\d{2}\b',
-        r'Invoice No\.\s*([0-9]+)',
+        r'\b[A-Z]?\d{1,6}/\d{2,4}-\d{2,4}\b',
         r'Invoice No\.\s*([A-Z0-9/-]+)',
-        r'Invoice No\.\s*([A-Z0-9]+)',  
+        r'Invoice\s*No\.?\s*[:\-]?\s*([A-Z0-9/-]+)',
+        r'Invoice No\.\s*([A-Z0-9]+)',
+        r'Invoice No\.\s*([0-9]+)'
     ]
-    invoice_no = find_first_match(text, patterns) 
-    return invoice_no
+    return find_first_match(text, patterns)
+
 
 
 def extract_invoice_date(text):
@@ -120,16 +130,15 @@ def parse_product_line(parts):
             desc = g.get("desc", "").strip()
             size = g.get("size", "").strip()
             
-            parts = desc.split("-")
-            parts = [p.strip() for p in parts if p.strip()]
-            if len(parts) >= 2:
-                code = parts[0]
-                maybe_size = parts[1] if len(parts) > 2 else ""
-                product_name = " - ".join(parts[2:]) if len(parts) > 2 else parts[1]
-                description = f"{code} - {maybe_size}".strip(" -")
+            desc_clean = re.sub(r'\s+', ' ', desc).strip()
+            if " (" in desc_clean:
+                main_name, bracket = desc_clean.split(" (", 1)
+                product_name = main_name.strip()
+                description = "(" + bracket.strip()
             else:
-                product_name = desc
+                product_name = desc_clean
                 description = ""
+            
             return {
                 "product_number": g.get("number"),
                 "product_name": product_name,
@@ -182,9 +191,6 @@ def extract_tax_and_totals(text, invoice_data):
 
 
 
-
-
-
 def extract_discount_amount(text):
     match = re.search(r'Discount\s+A/c\s+\(?-?\)?₹?\(?([0-9,]+\.\d{2})\)?', text, re.IGNORECASE)
     if match:
@@ -193,34 +199,21 @@ def extract_discount_amount(text):
 
 
 def get_tax_value_in_rupees(text, labels, subtotal):
-    """
-    Extract tax either directly in rupees or calculate from percentage.
-    """
+   
     for label in labels:
-        
-        rupee_match = re.search(rf'{label}[^\d₹%]*₹\s*([0-9,]+\.\d{{1,2}})', text, re.IGNORECASE)
+        rupee_match = re.search(
+            rf'{label}[^\d₹%]*₹?\s*([0-9]{{3,}},?[0-9]*\.\d{{1,2}})', text, re.IGNORECASE)
         if rupee_match:
-            return rupee_match.group(1).replace(",", "").strip()
-
-        
-        percent_match = re.search(rf'{label}[^\d₹%]*([0-9]+\.\d+|\d+)\s*%', text, re.IGNORECASE)
+            value = rupee_match.group(1).replace(",", "")
+            return f"{float(value):.2f}" 
+    for label in labels:
+        percent_match = re.search(
+            rf'{label}[^\d₹%]*([0-9]+\.\d+|\d+)\s*%', text, re.IGNORECASE)
         if percent_match and subtotal > 0:
             percentage = float(percent_match.group(1))
             tax_in_rupees = subtotal * (percentage / 100)
-            return f"{tax_in_rupees:.2f}"
-
-        loose_percent_match = re.search(rf'{label}[^\d₹%]*([0-9]+\.\d+|\d+)\b', text, re.IGNORECASE)
-        if loose_percent_match and subtotal > 0:
-            percentage = float(loose_percent_match.group(1))
-            tax_in_rupees = subtotal * (percentage / 100)
-            return f"{tax_in_rupees:.2f}"
-
+            return f"{tax_in_rupees:.2f}"  
     return "0.00"
-
-
-
-
-
 
 
 
